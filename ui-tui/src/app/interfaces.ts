@@ -225,6 +225,7 @@ export interface OverlayState {
   confirm: ConfirmReq | null
   modelPicker: boolean
   pager: null | PagerState
+  petPicker: boolean
   pluginsHub: boolean
   secret: null | SecretReq
   sessions: boolean
@@ -262,7 +263,6 @@ export interface UiState {
 
   sections: SectionVisibility
   sessionTitle: string
-  showCost: boolean
   showReasoning: boolean
   indicatorStyle: IndicatorStyle
   sid: null | string
