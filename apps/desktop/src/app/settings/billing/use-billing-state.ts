@@ -339,9 +339,13 @@ function deriveUsageRows(
   const monthly = parseAmount(current?.monthly_credits)
   const usage = subscription?.usage ?? billing.usage
 
+  // Remaining can go slightly negative (usage settles after credits hit zero).
+  // A raw "-$0.79 left" reads as broken — clamp to $0 and name the overage.
   const subscriptionValue =
     remaining != null && monthly != null
-      ? `${formatMoney(remaining)} of ${formatMoney(monthly)} left`
+      ? remaining < 0
+        ? `${formatMoney(0)} of ${formatMoney(monthly)} left · ${formatMoney(Math.abs(remaining))} over`
+        : `${formatMoney(remaining)} of ${formatMoney(monthly)} left`
       : (usage?.subscription_remaining_display ?? usage?.plan_bar?.remaining_display ?? EMPTY_BILLING_VALUE)
 
   rows.push({
@@ -480,7 +484,9 @@ function formatMoney(value?: null | number | string): string {
     return EMPTY_BILLING_VALUE
   }
 
-  return new Intl.NumberFormat(undefined, {
+  // Pin en-US so the symbol is always "$" — the server's *_display strings
+  // ("$996.47") sit next to these, and other locales render USD as "US$".
+  return new Intl.NumberFormat('en-US', {
     currency: 'USD',
     maximumFractionDigits: amount % 1 === 0 ? 0 : 2,
     minimumFractionDigits: amount % 1 === 0 ? 0 : 2,

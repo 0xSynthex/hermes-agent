@@ -86,6 +86,20 @@ describe('deriveBillingView', () => {
       value: 'Ultra'
     })
   })
+
+  it('clamps overdrawn subscription credits to $0 and names the overage', () => {
+    const view = deriveBillingView(
+      okBilling(todayBillingState),
+      okSubscription({
+        ...todaySubscriptionState,
+        current: { ...todaySubscriptionState.current, credits_remaining: '-0.79', monthly_credits: '220' }
+      })
+    )
+
+    const row = view.usageRows.find(r => r.id === 'subscription_credits')
+    expect(row?.value).toBe('$0 of $220 left · $0.79 over')
+    expect(row?.bar?.value).toBe(0)
+  })
 })
 
 describe('buildManageSubscriptionUrl', () => {
