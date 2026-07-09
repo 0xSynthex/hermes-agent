@@ -25,7 +25,11 @@ export interface Contribution {
   title?: string
   /** Ascending sort key within the area; ties keep insertion order. */
   order?: number
-  /** Dynamic visibility predicate. Omit for always-on. */
+  /** Dynamic visibility predicate. Omit for always-on.
+   *  NOTE: evaluated when the area's snapshot is (re)built — i.e. on a
+   *  register/remove in that area, NOT reactively. A `when()` that flips on
+   *  external state won't re-resolve on its own; trigger a registry mutation
+   *  (or don't rely on it flipping without one). */
   when?: () => boolean
   /** Soft disable without unregistering. `false` hides it. */
   enabled?: boolean

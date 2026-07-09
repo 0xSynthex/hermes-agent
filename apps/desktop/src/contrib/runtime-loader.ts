@@ -12,8 +12,19 @@
  *
  * Sources today: the in-repo runtime example (`?raw`, proves the pipeline)
  * and `<hermes home>/desktop-plugins/<name>/plugin.js` on disk — the door the
- * agent writes through. Remote (https + allowlist) rides the same
- * `loadRuntimePlugin(source, { integrity })` seam when it lands.
+ * agent writes through.
+ *
+ * SECURITY — this is NOT a capability boundary. A loaded plugin is evaluated
+ * as ESM in the renderer realm with FULL app authority: the React singleton,
+ * the whole SDK (`host.request` gateway RPC, `ctx.rest`, storage, `navigate`).
+ * The isolation here is *error* isolation only (ContribBoundary, isolated
+ * listeners) — a plugin can't crash the app, but it can do anything the app
+ * can. That's acceptable for local sources (disk files can already run code),
+ * and `integrity` only proves the bytes match a hash — it does NOT sandbox.
+ * A remote source (https + allowlist) must NOT reuse this pipeline as-is:
+ * it needs a real boundary (iframe/worker + CSP + capability gating) before
+ * it can land. The `{ integrity }` option is the transport seam, not the
+ * trust seam.
  */
 
 import { getStatus } from '@/hermes'
@@ -35,11 +46,39 @@ interface LoadOptions {
 /** Live runtime plugins: id -> disposers (unload/reload support). */
 const loaded = new Map<string, (() => void)[]>()
 
-const rewriteSpecifiers = (source: string): string =>
-  Object.entries(sdkImportMap()).reduce(
-    (out, [specifier, url]) => out.replaceAll(`"${specifier}"`, `"${url}"`).replaceAll(`'${specifier}'`, `'${url}'`),
-    source
+// Matches the specifier of a static `from '…'`, a side-effect `import '…'`, or
+// a dynamic `import('…')` — anchored to import/export syntax so a bare string
+// literal or comment (e.g. `notify('react')`) is never touched.
+const importSpecifierRe = () => /(from\s*|import\s*\(\s*|import\s+)(['"])([^'"]+)\2/g
+
+/** Rewrite ONLY mapped import specifiers (@hermes/plugin-sdk, react*) to their
+ *  live shim blob URLs — never occurrences inside strings/comments. */
+function rewriteSpecifiers(source: string): string {
+  const map = sdkImportMap()
+
+  return source.replace(importSpecifierRe(), (whole, pre, quote, spec) =>
+    map[spec] ? `${pre}${quote}${map[spec]}${quote}` : whole
   )
+}
+
+/** Bare import specifiers the loader can't resolve (not relative/URL, not in
+ *  the SDK map). Surfaced up-front so they don't fail as a cryptic native
+ *  "Failed to resolve module specifier" from the blob import. */
+function unsupportedImports(source: string): string[] {
+  const map = sdkImportMap()
+  const bare = new Set<string>()
+
+  for (const m of source.matchAll(importSpecifierRe())) {
+    const spec = m[3]
+
+    // Skip relative/absolute (./ ../ /) and any URL scheme (blob: http(s):).
+    if (spec && !/^[./]/.test(spec) && !/^[a-z][a-z0-9+.-]*:/i.test(spec) && !map[spec]) {
+      bare.add(spec)
+    }
+  }
+
+  return [...bare]
+}
 
 async function verifyIntegrity(source: string, integrity: string): Promise<boolean> {
   const [algo, expected] = integrity.split('-', 2)
@@ -49,6 +88,7 @@ async function verifyIntegrity(source: string, integrity: string): Promise<boole
   }
 
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(source))
+  // Standard SRI base64 (`sha256-<base64>`) — a base64url-encoded hash won't match.
   const actual = btoa(String.fromCharCode(...new Uint8Array(digest)))
 
   return actual === expected
@@ -66,6 +106,15 @@ export async function loadRuntimePlugin(source: string, origin: string, options:
   try {
     if (options.integrity && !(await verifyIntegrity(source, options.integrity))) {
       throw new Error(`integrity check failed for ${origin}`)
+    }
+
+    const unsupported = unsupportedImports(source)
+
+    if (unsupported.length > 0) {
+      throw new Error(
+        `unsupported import${unsupported.length > 1 ? 's' : ''}: ${unsupported.join(', ')} — ` +
+          `runtime plugins may only import @hermes/plugin-sdk and react`
+      )
     }
 
     const url = URL.createObjectURL(new Blob([rewriteSpecifiers(source)], { type: 'text/javascript' }))
@@ -148,14 +197,24 @@ interface DiskPlugin {
 
 const disk = new Map<string, DiskPlugin>()
 let watching = false
+let scanning = false
 
 async function loadDiskPlugin(name: string, file: string): Promise<void> {
   const desktop = window.hermesDesktop!
   const entry = disk.get(name)
+  const prevId = entry?.id
 
   try {
     const { text } = await desktop.readFileText(file)
     const id = await loadRuntimePlugin(text, name, { file })
+
+    // A hot-edit that changes `plugin.id`: loadRuntimePlugin only disposes the
+    // NEW id, so unload the previous incarnation here or its contributions +
+    // inventory row orphan.
+    if (id && prevId && prevId !== id) {
+      unloadRuntimePlugin(prevId)
+      dropPlugin(prevId)
+    }
 
     if (entry) {
       entry.id = id ?? entry.id
@@ -174,9 +233,13 @@ async function loadDiskPlugin(name: string, file: string): Promise<void> {
 async function scanDiskPlugins(): Promise<void> {
   const desktop = window.hermesDesktop
 
-  if (!desktop) {
+  // Re-entrancy guard: the 5s poll must not overlap a slow in-flight scan
+  // (reads/loads can exceed the interval).
+  if (!desktop || scanning) {
     return
   }
+
+  scanning = true
 
   try {
     const { hermes_home } = await getStatus()
@@ -231,6 +294,8 @@ async function scanDiskPlugins(): Promise<void> {
     }
   } catch {
     // No desktop-plugins dir (or no gateway yet) — nothing to reconcile.
+  } finally {
+    scanning = false
   }
 }
 

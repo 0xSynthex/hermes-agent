@@ -584,6 +584,7 @@ export function isLayoutNode(value: unknown): value is LayoutNode {
       n.children.length > 0 &&
       n.children.every(isLayoutNode) &&
       Array.isArray(n.weights) &&
+      n.weights.length === n.children.length &&
       n.weights.every(w => typeof w === 'number' && Number.isFinite(w) && w > 0)
     )
   }
